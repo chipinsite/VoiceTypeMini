@@ -60,7 +60,7 @@ else
   fi
 fi
 
-log "Building, testing, signing, and installing VoiceTypeMini"
+log "Building, signing, and installing VoiceTypeMini"
 cd "$SOURCE_DIR"
 Scripts/install-app.sh
 

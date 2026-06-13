@@ -15,7 +15,10 @@ rsync -a --delete \
 
 cd "$BUILD_ROOT"
 swift build --jobs 1
-swift test --jobs 1
+
+if [[ "${VOICE_TYPE_RUN_TESTS:-0}" == "1" ]]; then
+  swift test --jobs 1
+fi
 
 pkill -x VoiceTypeMini 2>/dev/null || true
 rm -rf /tmp/VoiceTypeMini.app

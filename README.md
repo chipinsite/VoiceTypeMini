@@ -24,7 +24,13 @@ Install or update from GitHub with one command:
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/chipinsite/VoiceTypeMini/main/install.sh)"
 ```
 
-The installer clones the source into `~/Developer/VoiceTypeMini`, runs the tests, builds and signs the app, installs it into `/Applications/VoiceTypeMini.app`, verifies the signature, and opens the app.
+The installer clones the source into `~/Developer/VoiceTypeMini`, builds and signs the app, installs it into `/Applications/VoiceTypeMini.app`, verifies the signature, and opens the app.
+
+To run development tests on a Mac with a full compatible Swift test toolchain:
+
+```sh
+VOICE_TYPE_RUN_TESTS=1 Scripts/install-app.sh
+```
 
 You can also clone and install manually:
 
