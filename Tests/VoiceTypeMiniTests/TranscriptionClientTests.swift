@@ -1,11 +1,12 @@
 import Foundation
-import Testing
+import XCTest
 @testable import VoiceTypeMini
 
-@Test
-func stubTranscriberReturnsPreviewText() async throws {
-    let client = StubTranscriptionClient()
-    let text = try await client.transcribe(audioFileURL: URL(fileURLWithPath: "/dev/null"))
+final class TranscriptionClientTests: XCTestCase {
+    func testStubTranscriberReturnsPreviewText() async throws {
+        let client = StubTranscriptionClient()
+        let text = try await client.transcribe(audioFileURL: URL(fileURLWithPath: "/dev/null"))
 
-    #expect(text.contains("VoiceTypeMini"))
+        XCTAssertTrue(text.contains("VoiceTypeMini"))
+    }
 }
