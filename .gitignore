@@ -1,0 +1,12 @@
+.build/
+.swiftpm/
+.DS_Store
+DerivedData/
+*.xcuserdata/
+*.xcworkspace/xcuserdata/
+/VoiceTypeMini.app
+
+# Local Codex handoff notes. Keep these off public GitHub because they can
+# contain absolute machine paths and signing identity details.
+HANDOVER.md
+PROJECT_HOME.md
