@@ -3,6 +3,7 @@ import SwiftUI
 
 struct StatusMenuView: View {
     @ObservedObject var appState: AppState
+    @ObservedObject var updateController: UpdateController
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -105,6 +106,11 @@ struct StatusMenuView: View {
                 Button("Test Paste Command") {
                     appState.testInsertion()
                 }
+
+                Button("Check for Updates...") {
+                    updateController.checkForUpdates()
+                }
+                .disabled(!updateController.canCheckForUpdates)
 
                 Button("Reset") {
                     appState.reset()

@@ -6,6 +6,7 @@ APP_DIR="${VOICE_TYPE_APP_DIR:-/tmp/VoiceTypeMini.app}"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
+FRAMEWORKS_DIR="$CONTENTS_DIR/Frameworks"
 SKIP_BUILD="${1:-}"
 
 cd "$ROOT_DIR"
@@ -23,11 +24,31 @@ if [[ ! -x "$BUILD_DIR/VoiceTypeMini" ]]; then
 fi
 
 rm -rf "$APP_DIR"
-mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
+mkdir -p "$MACOS_DIR" "$RESOURCES_DIR" "$FRAMEWORKS_DIR"
 
 ditto --noextattr --noqtn "$BUILD_DIR/VoiceTypeMini" "$MACOS_DIR/VoiceTypeMini"
 ditto --noextattr --noqtn "$ROOT_DIR/AppConfig/Info.plist" "$CONTENTS_DIR/Info.plist"
 ditto --noextattr --noqtn "$ROOT_DIR/AppAssets/VoiceTypeMini.icns" "$RESOURCES_DIR/VoiceTypeMini.icns"
+
+if [[ -n "${VOICE_TYPE_APPCAST_URL:-}" ]]; then
+  /usr/libexec/PlistBuddy -c "Set :SUFeedURL ${VOICE_TYPE_APPCAST_URL}" "$CONTENTS_DIR/Info.plist"
+fi
+
+if [[ -n "${VOICE_TYPE_SPARKLE_PUBLIC_ED_KEY:-}" ]]; then
+  /usr/libexec/PlistBuddy -c "Set :SUPublicEDKey ${VOICE_TYPE_SPARKLE_PUBLIC_ED_KEY}" "$CONTENTS_DIR/Info.plist"
+fi
+
+SPARKLE_FRAMEWORK="${SPARKLE_FRAMEWORK:-}"
+if [[ -z "$SPARKLE_FRAMEWORK" ]]; then
+  SPARKLE_FRAMEWORK="$(
+    find "$ROOT_DIR/.build" -path "*/Sparkle.framework" -type d -print 2>/dev/null \
+      | head -n 1
+  )"
+fi
+
+if [[ -n "$SPARKLE_FRAMEWORK" && -d "$SPARKLE_FRAMEWORK" ]]; then
+  ditto --noextattr --noqtn "$SPARKLE_FRAMEWORK" "$FRAMEWORKS_DIR/Sparkle.framework"
+fi
 
 find "$BUILD_DIR" -maxdepth 1 -type d -name "*.bundle" -print0 | while IFS= read -r -d '' bundle; do
   ditto --noextattr --noqtn "$bundle" "$RESOURCES_DIR/$(basename "$bundle")"
@@ -51,7 +72,17 @@ if [[ -z "$SIGN_IDENTITY" ]]; then
 fi
 SIGN_IDENTITY="${SIGN_IDENTITY:--}"
 
-codesign --force --sign "$SIGN_IDENTITY" \
+SIGN_ARGS=(--force --sign "$SIGN_IDENTITY")
+if [[ "$SIGN_IDENTITY" != "-" ]]; then
+  SIGN_ARGS+=(--options runtime --timestamp)
+fi
+
+find "$APP_DIR" -depth \( -name "*.xpc" -o -name "*.framework" -o -name "*.dylib" \) -print0 |
+  while IFS= read -r -d '' signable; do
+    codesign "${SIGN_ARGS[@]}" "$signable"
+  done
+
+codesign "${SIGN_ARGS[@]}" \
   --entitlements "$ROOT_DIR/AppConfig/VoiceTypeMini.entitlements" \
   "$APP_DIR"
 

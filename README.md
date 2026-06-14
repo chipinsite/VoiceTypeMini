@@ -46,6 +46,47 @@ First-run permissions:
 - Accessibility: `System Settings > Privacy & Security > Accessibility > VoiceTypeMini`.
 - Input Monitoring: `System Settings > Privacy & Security > Input Monitoring > VoiceTypeMini`, if macOS asks.
 
+## Releases And Updates
+
+VoiceTypeMini uses Sparkle for app updates in signed release builds. A source
+build will not start the updater unless the release bundle has a real Sparkle
+public EdDSA key in `SUPublicEDKey`.
+
+Important rollout note: users who already installed a build before Sparkle was
+added must manually install one Sparkle-enabled release. After that, future
+published releases can be discovered from inside the app.
+
+Required GitHub repository secrets for release publishing:
+
+- `DEVELOPER_ID_APPLICATION_CERT_BASE64`: base64-encoded Developer ID
+  Application `.p12`.
+- `DEVELOPER_ID_APPLICATION_CERT_PASSWORD`: password for the `.p12`.
+- `DEVELOPER_ID_APPLICATION_IDENTITY`: codesign identity name, for example
+  `Developer ID Application: Example Ltd (TEAMID)`.
+- `SPARKLE_PUBLIC_ED_KEY`: public key printed by Sparkle `generate_keys`.
+- `SPARKLE_PRIVATE_KEY_BASE64`: base64-encoded Sparkle private key export.
+- `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_SPECIFIC_PASSWORD`: notarization
+  credentials for `notarytool`.
+
+Create a release from GitHub Actions:
+
+1. Open **Actions > Release VoiceTypeMini**.
+2. Run the workflow with a marketing version such as `0.2.0` and an incrementing
+   build number such as `2`.
+3. The workflow builds, signs, notarizes, creates a GitHub Release ZIP, and
+   commits the generated `appcast.xml` back to `main`.
+
+Local dry run, without notarization:
+
+```sh
+VERSION=0.2.0 \
+BUILD_NUMBER=2 \
+SPARKLE_PUBLIC_ED_KEY="<public-key>" \
+ALLOW_AD_HOC_RELEASE=1 \
+SKIP_NOTARIZATION=1 \
+Scripts/release-build.sh
+```
+
 ## Build Plan
 
 ## Local App Bundle
