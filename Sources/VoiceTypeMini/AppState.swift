@@ -30,12 +30,18 @@ final class AppState: ObservableObject {
     @Published var selectedBackend: TranscriptionBackend = .whisperKit {
         didSet {
             UserDefaults.standard.set(selectedBackend.rawValue, forKey: Constants.backendKey)
+            if selectedBackend == .whisperKit {
+                whisperKitTranscriber.warmUp()
+            }
         }
     }
     @Published var selectedWhisperModel: WhisperKitModel = .base {
         didSet {
             UserDefaults.standard.set(selectedWhisperModel.rawValue, forKey: Constants.whisperModelKey)
             whisperKitTranscriber.setModel(selectedWhisperModel.rawValue)
+            if selectedBackend == .whisperKit {
+                whisperKitTranscriber.warmUp()
+            }
         }
     }
     @Published var openAIAPIKey: String = ""
@@ -68,6 +74,7 @@ final class AppState: ObservableObject {
     @Published private(set) var personalVocabulary: [PersonalVocabularyEntry] = []
     @Published var personalVocabularyText: String = ""
     @Published private(set) var learningStatusText: String = "Learning: no corrections yet"
+    @Published private(set) var whisperKitStatusText: String = "WhisperKit: preparing local model"
     @Published var isDockExpanded: Bool = false
     @Published private(set) var audioLevel: Double = 0
 
@@ -84,6 +91,9 @@ final class AppState: ObservableObject {
     private var lastRecordingURL: URL?
     private var lastRawTranscript: String?
     private var appActivationObserver: NSObjectProtocol?
+    private var transcriptionTask: Task<Void, Never>?
+    private var transcriptionTimeoutTask: Task<Void, Never>?
+    private var transcriptionGeneration = 0
 
     init() {
         openAIAPIKey = (try? KeychainStore.read(
@@ -95,6 +105,9 @@ final class AppState: ObservableObject {
         personalVocabulary = vocabularyStore.load()
         personalVocabularyText = PersonalVocabularyEntry.formatLines(personalVocabulary)
         refreshLearningStatus()
+        whisperKitTranscriber.onPreparationStatusChange = { [weak self] status in
+            self?.whisperKitStatusText = status
+        }
         if let savedBackend = UserDefaults.standard.string(forKey: Constants.backendKey),
            let backend = TranscriptionBackend(rawValue: savedBackend) {
             selectedBackend = backend
@@ -106,6 +119,7 @@ final class AppState: ObservableObject {
         } else {
             whisperKitTranscriber.setModel(selectedWhisperModel.rawValue)
         }
+        whisperKitTranscriber.warmUp()
         if let savedInsertionMode = UserDefaults.standard.string(forKey: Constants.insertionModeKey),
            let insertionMode = TextInsertionController.InsertionMode(rawValue: savedInsertionMode) {
             selectedInsertionMode = insertionMode
@@ -278,7 +292,11 @@ final class AppState: ObservableObject {
             return "Accessibility is not enabled. Transcript is copied to clipboard."
         case .transcribing:
             if selectedBackend == .whisperKit {
-                return "Backend: WhisperKit \(selectedWhisperModel.displayName)"
+                if whisperKitStatusText.hasPrefix("WhisperKit ") {
+                    return whisperKitStatusText.replacingOccurrences(of: "WhisperKit ", with: "Backend: WhisperKit ")
+                }
+
+                return "Backend: \(whisperKitStatusText)"
             }
             return "Backend: \(selectedBackend.rawValue)"
         case .recording:
@@ -454,6 +472,7 @@ final class AppState: ObservableObject {
         if recorder.isRecording {
             recorder.cancel()
         }
+        cancelActiveTranscription()
 
         frontmostApplicationTracker.captureCurrentFrontmostApplication()
         refreshPasteTargetStatus()
@@ -507,11 +526,33 @@ final class AppState: ObservableObject {
             return
         }
 
-        Task {
+        cancelActiveTranscription()
+        transcriptionGeneration += 1
+        let generation = transcriptionGeneration
+        scheduleTranscriptionTimeout(for: generation, seconds: 45)
+        transcriptionTask = Task { [weak self] in
+            guard let self else {
+                return
+            }
+
+            defer {
+                if self.transcriptionGeneration == generation {
+                    if Task.isCancelled {
+                        self.status = self.lastTranscript.map { .ready($0) } ?? .idle
+                    }
+                    self.transcriptionTimeoutTask?.cancel()
+                    self.transcriptionTimeoutTask = nil
+                    self.transcriptionTask = nil
+                }
+            }
+
             do {
                 status = .transcribing
                 let client = try transcriptionClient()
                 let rawTranscript = try await client.transcribe(audioFileURL: lastRecordingURL)
+                guard !Task.isCancelled, self.transcriptionGeneration == generation else {
+                    return
+                }
                 let processedTranscript = postProcessTranscript(rawTranscript)
                 lastRawTranscript = rawTranscript
                 addTranscriptToHistory(
@@ -524,6 +565,9 @@ final class AppState: ObservableObject {
                 handleInsertionResult(insertionResult, text: processedTranscript.text, targetName: targetName)
                 hideOverlayAfterDelay()
             } catch {
+                guard !Task.isCancelled, self.transcriptionGeneration == generation else {
+                    return
+                }
                 status = .failed(error.localizedDescription)
                 hideOverlayAfterDelay(seconds: 4)
             }
@@ -546,6 +590,7 @@ final class AppState: ObservableObject {
     }
 
     func reset() {
+        cancelActiveTranscription()
         if recorder.isRecording {
             recorder.cancel()
         }
@@ -725,6 +770,40 @@ final class AppState: ObservableObject {
         )
         status = .ready(corrected)
         refreshLearningStatus()
+    }
+
+    private func cancelActiveTranscription() {
+        transcriptionGeneration += 1
+        transcriptionTimeoutTask?.cancel()
+        transcriptionTimeoutTask = nil
+        transcriptionTask?.cancel()
+        transcriptionTask = nil
+    }
+
+    private func scheduleTranscriptionTimeout(for generation: Int, seconds: UInt64) {
+        transcriptionTimeoutTask?.cancel()
+        transcriptionTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: seconds * 1_000_000_000)
+
+            guard !Task.isCancelled else {
+                return
+            }
+
+            await MainActor.run {
+                guard let self,
+                      self.transcriptionGeneration == generation,
+                      self.status == .transcribing else {
+                    return
+                }
+
+                self.transcriptionGeneration += 1
+                self.transcriptionTask?.cancel()
+                self.transcriptionTask = nil
+                self.transcriptionTimeoutTask = nil
+                self.status = .failed("Transcription took longer than \(seconds) seconds. Please try again.")
+                self.hideOverlayAfterDelay(seconds: 4)
+            }
+        }
     }
 
     func requestAccessibilityPermission() {

@@ -37,6 +37,12 @@ export VOICE_TYPE_APP_DIR="$APP_DIR"
 export VOICE_TYPE_APPCAST_URL="$APPCAST_URL"
 export VOICE_TYPE_SPARKLE_PUBLIC_ED_KEY="$SPARKLE_PUBLIC_ED_KEY"
 
+if [[ "${VOICE_TYPE_SKIP_WHISPERKIT_PREFETCH:-0}" != "1" ]]; then
+  export VOICE_TYPE_WHISPERKIT_MODELS_DIR="${VOICE_TYPE_WHISPERKIT_MODELS_DIR:-$DIST_DIR/WhisperKitModels}"
+  read -r -a whisperkit_models <<< "${VOICE_TYPE_WHISPERKIT_MODELS:-base}"
+  "$ROOT_DIR/Scripts/prefetch-whisperkit-models.sh" "${whisperkit_models[@]}"
+fi
+
 "$ROOT_DIR/Scripts/build-app.sh"
 
 GENERATE_KEYS="${SPARKLE_GENERATE_KEYS:-$("$ROOT_DIR/Scripts/find-sparkle-tool.sh" generate_keys)}"

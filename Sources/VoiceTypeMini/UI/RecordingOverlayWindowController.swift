@@ -27,8 +27,8 @@ final class RecordingOverlayWindowController {
 
         appState.$isDockExpanded
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in
-                self?.updateWindow(appState: appState)
+            .sink { [weak self] isExpanded in
+                self?.handleDockExpansionChange(isExpanded: isExpanded, appState: appState)
             }
             .store(in: &cancellables)
 
@@ -46,8 +46,9 @@ final class RecordingOverlayWindowController {
         window.hidesOnDeactivate = false
         window.becomesKeyOnlyIfNeeded = true
         window.ignoresMouseEvents = false
+        window.acceptsMouseMovedEvents = true
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
-        window.setContentSize(Self.idleSize)
+        window.setContentSize(RecordingOverlayMetrics.idleSize)
 
         self.window = window
         position(window: window)
@@ -61,6 +62,32 @@ final class RecordingOverlayWindowController {
         resize(window: window, to: targetSize(for: appState))
         position(window: window)
         window.orderFrontRegardless()
+    }
+
+    private func handleDockExpansionChange(isExpanded: Bool, appState: AppState) {
+        if shouldKeepDockExpanded(isExpanded: isExpanded, appState: appState) {
+            appState.isDockExpanded = true
+            return
+        }
+
+        updateWindow(appState: appState)
+    }
+
+    private func shouldKeepDockExpanded(isExpanded: Bool, appState: AppState) -> Bool {
+        guard !isExpanded, !appState.isRecording, !appState.shouldShowOverlay else {
+            return false
+        }
+
+        return isMouseInsideOverlay(padding: 10)
+    }
+
+    func isMouseInsideOverlay(padding: CGFloat = 0) -> Bool {
+        guard let window else {
+            return false
+        }
+
+        let paddedFrame = window.frame.insetBy(dx: -padding, dy: -padding)
+        return paddedFrame.contains(NSEvent.mouseLocation)
     }
 
     private func resize(window: NSWindow, to size: NSSize) {
@@ -90,18 +117,15 @@ final class RecordingOverlayWindowController {
 
     private func targetSize(for appState: AppState) -> NSSize {
         if appState.isRecording {
-            return Self.recordingSize
+            return RecordingOverlayMetrics.recordingSize
         }
 
         if appState.isDockExpanded || appState.shouldShowOverlay {
-            return appState.shouldShowOverlay && !appState.isRecording ? Self.statusSize : Self.expandedSize
+            return appState.shouldShowOverlay && !appState.isRecording
+                ? RecordingOverlayMetrics.statusSize
+                : RecordingOverlayMetrics.expandedSize
         }
 
-        return Self.idleSize
+        return RecordingOverlayMetrics.idleSize
     }
-
-    private static let idleSize = NSSize(width: 86, height: 18)
-    private static let recordingSize = NSSize(width: 214, height: 58)
-    private static let expandedSize = NSSize(width: 292, height: 82)
-    private static let statusSize = NSSize(width: 292, height: 98)
 }

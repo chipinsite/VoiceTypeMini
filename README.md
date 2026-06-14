@@ -26,6 +26,12 @@ Install or update from GitHub with one command:
 
 The installer clones the source into `~/Developer/VoiceTypeMini`, builds and signs the app, installs it into `/Applications/VoiceTypeMini.app`, verifies the signature, and opens the app.
 
+Source installs and signed release builds prefetch and bundle the WhisperKit
+`base` model by default so the first launch has local model weights available.
+Set `VOICE_TYPE_WHISPERKIT_MODELS="base small"` to bundle more models, or
+`VOICE_TYPE_SKIP_WHISPERKIT_PREFETCH=1` to keep the release smaller and let the
+app download the selected model into Application Support on first launch.
+
 To run development tests on a Mac with a full compatible Swift test toolchain:
 
 ```sh
@@ -85,6 +91,13 @@ SPARKLE_PUBLIC_ED_KEY="<public-key>" \
 ALLOW_AD_HOC_RELEASE=1 \
 SKIP_NOTARIZATION=1 \
 Scripts/release-build.sh
+```
+
+To explicitly prefetch model weights before packaging:
+
+```sh
+Scripts/prefetch-whisperkit-models.sh base
+Scripts/build-app.sh
 ```
 
 ## Build Plan

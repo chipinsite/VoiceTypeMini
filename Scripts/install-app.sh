@@ -14,10 +14,16 @@ rsync -a --delete \
   "$ROOT_DIR/" "$BUILD_ROOT/"
 
 cd "$BUILD_ROOT"
-swift build --jobs 1
+swift build --product VoiceTypeMini --jobs 1
 
 if [[ "${VOICE_TYPE_RUN_TESTS:-0}" == "1" ]]; then
   swift test --jobs 1
+fi
+
+if [[ "${VOICE_TYPE_SKIP_WHISPERKIT_PREFETCH:-0}" != "1" ]]; then
+  # Bundle model weights into the installed app so first launch can work offline.
+  read -r -a whisperkit_models <<< "${VOICE_TYPE_WHISPERKIT_MODELS:-base}"
+  Scripts/prefetch-whisperkit-models.sh "${whisperkit_models[@]}"
 fi
 
 pkill -x VoiceTypeMini 2>/dev/null || true

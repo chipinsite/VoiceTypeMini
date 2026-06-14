@@ -12,7 +12,7 @@ SKIP_BUILD="${1:-}"
 cd "$ROOT_DIR"
 
 if [[ "$SKIP_BUILD" != "--skip-build" ]]; then
-  swift build
+  swift build --product VoiceTypeMini
 fi
 
 BUILD_DIR="${VOICE_TYPE_BUILD_DIR:-$(swift build --show-bin-path)}"
@@ -50,9 +50,29 @@ if [[ -n "$SPARKLE_FRAMEWORK" && -d "$SPARKLE_FRAMEWORK" ]]; then
   ditto --noextattr --noqtn "$SPARKLE_FRAMEWORK" "$FRAMEWORKS_DIR/Sparkle.framework"
 fi
 
-find "$BUILD_DIR" -maxdepth 1 -type d -name "*.bundle" -print0 | while IFS= read -r -d '' bundle; do
-  ditto --noextattr --noqtn "$bundle" "$RESOURCES_DIR/$(basename "$bundle")"
-done
+if ! otool -l "$MACOS_DIR/VoiceTypeMini" | grep -q "@executable_path/../Frameworks"; then
+  install_name_tool -add_rpath "@executable_path/../Frameworks" "$MACOS_DIR/VoiceTypeMini"
+fi
+
+copy_resource_bundles() {
+  local search_dir="$1"
+  [[ -d "$search_dir" ]] || return 0
+
+  find "$search_dir" -maxdepth 4 -type d -name "*.bundle" -print0 | while IFS= read -r -d '' bundle; do
+    ditto --noextattr --noqtn "$bundle" "$RESOURCES_DIR/$(basename "$bundle")"
+  done
+}
+
+copy_resource_bundles "$BUILD_DIR"
+copy_resource_bundles "$ROOT_DIR/.build/debug"
+copy_resource_bundles "$ROOT_DIR/.build/release"
+copy_resource_bundles "$ROOT_DIR/.build/arm64-apple-macosx/debug"
+copy_resource_bundles "$ROOT_DIR/.build/arm64-apple-macosx/release"
+
+WHISPERKIT_MODELS_SOURCE="${VOICE_TYPE_WHISPERKIT_MODELS_DIR:-$ROOT_DIR/WhisperKitModels}"
+if [[ -d "$WHISPERKIT_MODELS_SOURCE" ]]; then
+  ditto --noextattr --noqtn "$WHISPERKIT_MODELS_SOURCE" "$RESOURCES_DIR/WhisperKitModels"
+fi
 
 chmod +x "$MACOS_DIR/VoiceTypeMini"
 /usr/bin/xattr -rc "$APP_DIR" 2>/dev/null || true

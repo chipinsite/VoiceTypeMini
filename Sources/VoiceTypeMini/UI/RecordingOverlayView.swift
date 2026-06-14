@@ -3,6 +3,7 @@ import SwiftUI
 struct RecordingOverlayView: View {
     @ObservedObject var appState: AppState
     @State private var hoveredItem: DockItem?
+    @State private var collapseWorkItem: DispatchWorkItem?
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -76,14 +77,10 @@ struct RecordingOverlayView: View {
         .frame(width: dockWidth, height: dockHeight, alignment: .bottom)
         .contentShape(Rectangle())
         .onHover { hovering in
-            withAnimation(.spring(response: 0.22, dampingFraction: 0.86)) {
-                if !appState.isRecording {
-                    appState.isDockExpanded = hovering
-                }
-                if !hovering {
-                    hoveredItem = nil
-                }
-            }
+            hovering ? expandDock() : scheduleDockCollapse()
+        }
+        .onDisappear {
+            collapseWorkItem?.cancel()
         }
     }
 
@@ -93,22 +90,22 @@ struct RecordingOverlayView: View {
 
     private var dockWidth: CGFloat {
         if appState.isRecording {
-            return 214
+            return RecordingOverlayMetrics.recordingSize.width
         }
 
-        return shouldShowFullDock ? 292 : 86
+        return shouldShowFullDock ? RecordingOverlayMetrics.expandedSize.width : RecordingOverlayMetrics.idleSize.width
     }
 
     private var dockHeight: CGFloat {
         if appState.isRecording {
-            return 58
+            return RecordingOverlayMetrics.recordingSize.height
         }
 
         if shouldShowFullDock {
-            return isStatusVisible ? 98 : 82
+            return isStatusVisible ? RecordingOverlayMetrics.statusSize.height : RecordingOverlayMetrics.expandedSize.height
         }
 
-        return 18
+        return RecordingOverlayMetrics.idleSize.height
     }
 
     private var isStatusVisible: Bool {
@@ -138,6 +135,41 @@ struct RecordingOverlayView: View {
         default:
             return appState.selectedPushToTalkHotkey.displayName
         }
+    }
+
+    private func expandDock() {
+        collapseWorkItem?.cancel()
+        collapseWorkItem = nil
+
+        guard !appState.isRecording else {
+            return
+        }
+
+        withAnimation(.spring(response: 0.22, dampingFraction: 0.86)) {
+            appState.isDockExpanded = true
+        }
+    }
+
+    private func scheduleDockCollapse() {
+        collapseWorkItem?.cancel()
+
+        let workItem = DispatchWorkItem {
+            guard !appState.isRecording, !appState.shouldShowOverlay else {
+                return
+            }
+
+            if RecordingOverlayWindowController.shared.isMouseInsideOverlay(padding: 10) {
+                scheduleDockCollapse()
+                return
+            }
+
+            withAnimation(.spring(response: 0.22, dampingFraction: 0.86)) {
+                appState.isDockExpanded = false
+                hoveredItem = nil
+            }
+        }
+        collapseWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: workItem)
     }
 }
 

@@ -6,6 +6,10 @@ DerivedData/
 *.xcworkspace/xcuserdata/
 /VoiceTypeMini.app
 
+# WhisperKit model weights are large. Keep them local and pass
+# VOICE_TYPE_WHISPERKIT_MODELS_DIR to Scripts/build-app.sh when bundling release assets.
+/WhisperKitModels/
+
 # Local Codex handoff notes. Keep these off public GitHub because they can
 # contain absolute machine paths and signing identity details.
 HANDOVER.md

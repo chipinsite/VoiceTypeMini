@@ -11,6 +11,10 @@ let package = Package(
         .executable(
             name: "VoiceTypeMini",
             targets: ["VoiceTypeMini"]
+        ),
+        .executable(
+            name: "WhisperKitModelPrefetch",
+            targets: ["WhisperKitModelPrefetch"]
         )
     ],
     dependencies: [
@@ -24,6 +28,13 @@ let package = Package(
                 .product(name: "WhisperKit", package: "argmax-oss-swift"),
                 .product(name: "Sparkle", package: "Sparkle")
             ]
+        ),
+        .executableTarget(
+            name: "WhisperKitModelPrefetch",
+            dependencies: [
+                .product(name: "WhisperKit", package: "argmax-oss-swift")
+            ],
+            path: "Tools/WhisperKitModelPrefetch"
         ),
         .testTarget(
             name: "VoiceTypeMiniTests",
