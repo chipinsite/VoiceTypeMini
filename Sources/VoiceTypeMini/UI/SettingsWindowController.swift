@@ -22,8 +22,8 @@ final class SettingsWindowController {
         window.title = "VoiceTypeMini Settings"
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         window.isReleasedWhenClosed = false
-        window.setContentSize(NSSize(width: 680, height: 620))
-        window.minSize = NSSize(width: 620, height: 520)
+        window.setContentSize(NSSize(width: 980, height: 690))
+        window.minSize = NSSize(width: 900, height: 620)
         window.center()
         window.setFrameAutosaveName("VoiceTypeMiniSettings")
         let delegate = WindowDelegate { [weak self] in

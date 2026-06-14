@@ -25,6 +25,9 @@ final class AudioRecorder {
 
     private var recorder: AVAudioRecorder?
     private var outputURL: URL?
+    private var meteringTimer: Timer?
+
+    var onLevelChange: ((Double) -> Void)?
 
     var isRecording: Bool {
         recorder?.isRecording == true
@@ -73,6 +76,7 @@ final class AudioRecorder {
 
         self.recorder = recorder
         outputURL = url
+        startMetering()
     }
 
     func stop() throws -> URL {
@@ -81,6 +85,7 @@ final class AudioRecorder {
         }
 
         recorder?.stop()
+        stopMetering()
         recorder = nil
         self.outputURL = nil
 
@@ -89,6 +94,7 @@ final class AudioRecorder {
 
     func cancel() {
         recorder?.stop()
+        stopMetering()
         recorder = nil
         outputURL = nil
     }
@@ -99,5 +105,35 @@ final class AudioRecorder {
         }
 
         try? FileManager.default.removeItem(at: url)
+    }
+
+    private func startMetering() {
+        stopMetering()
+        onLevelChange?(0)
+
+        meteringTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.publishMeterLevel()
+            }
+        }
+    }
+
+    private func stopMetering() {
+        meteringTimer?.invalidate()
+        meteringTimer = nil
+        onLevelChange?(0)
+    }
+
+    private func publishMeterLevel() {
+        guard let recorder, recorder.isRecording else {
+            onLevelChange?(0)
+            return
+        }
+
+        recorder.updateMeters()
+        let decibels = Double(recorder.averagePower(forChannel: 0))
+        let clipped = max(-55, min(0, decibels))
+        let normalized = pow(10, clipped / 35)
+        onLevelChange?(max(0, min(1, normalized)))
     }
 }

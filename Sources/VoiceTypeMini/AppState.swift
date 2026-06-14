@@ -12,6 +12,7 @@ final class AppState: ObservableObject {
         static let insertionModeKey = "insertion-mode"
         static let preserveClipboardKey = "preserve-clipboard"
         static let pushToTalkHotkeyKey = "push-to-talk-hotkey"
+        static let dockHotkeyMigrationKey = "dock-hotkey-migration-v1"
     }
 
     enum Status: Equatable {
@@ -51,7 +52,7 @@ final class AppState: ObservableObject {
             UserDefaults.standard.set(preserveClipboard, forKey: Constants.preserveClipboardKey)
         }
     }
-    @Published var selectedPushToTalkHotkey: PushToTalkHotkeyController.Hotkey = .controlOptionSpace {
+    @Published var selectedPushToTalkHotkey: PushToTalkHotkeyController.Hotkey = .fnKey {
         didSet {
             UserDefaults.standard.set(selectedPushToTalkHotkey.rawValue, forKey: Constants.pushToTalkHotkeyKey)
             restartPushToTalkHotkey()
@@ -63,6 +64,12 @@ final class AppState: ObservableObject {
     @Published private(set) var pasteTargetStatusText: String = "Paste target: not captured yet"
     @Published private(set) var launchAtLoginStatusText: String = "Launch at login: not checked"
     @Published private(set) var transcriptHistory: [TranscriptHistoryItem] = []
+    @Published private(set) var correctionExamples: [CorrectionExample] = []
+    @Published private(set) var personalVocabulary: [PersonalVocabularyEntry] = []
+    @Published var personalVocabularyText: String = ""
+    @Published private(set) var learningStatusText: String = "Learning: no corrections yet"
+    @Published var isDockExpanded: Bool = false
+    @Published private(set) var audioLevel: Double = 0
 
     private let previewTranscriber: TranscriptionClient = StubTranscriptionClient()
     private let whisperKitTranscriber = WhisperKitTranscriptionClient(model: "base")
@@ -72,7 +79,10 @@ final class AppState: ObservableObject {
     private let frontmostApplicationTracker = FrontmostApplicationTracker()
     private let launchAtLoginController = LaunchAtLoginController()
     private let historyStore = TranscriptHistoryStore()
+    private let correctionStore = CorrectionLearningStore()
+    private let vocabularyStore = PersonalVocabularyStore()
     private var lastRecordingURL: URL?
+    private var lastRawTranscript: String?
     private var appActivationObserver: NSObjectProtocol?
 
     init() {
@@ -81,6 +91,10 @@ final class AppState: ObservableObject {
             account: Constants.openAIAccount
         )) ?? ""
         transcriptHistory = historyStore.load()
+        correctionExamples = correctionStore.load()
+        personalVocabulary = vocabularyStore.load()
+        personalVocabularyText = PersonalVocabularyEntry.formatLines(personalVocabulary)
+        refreshLearningStatus()
         if let savedBackend = UserDefaults.standard.string(forKey: Constants.backendKey),
            let backend = TranscriptionBackend(rawValue: savedBackend) {
             selectedBackend = backend
@@ -102,6 +116,12 @@ final class AppState: ObservableObject {
            let hotkey = PushToTalkHotkeyController.Hotkey(rawValue: savedHotkey) {
             selectedPushToTalkHotkey = hotkey
         }
+        if !UserDefaults.standard.bool(forKey: Constants.dockHotkeyMigrationKey) {
+            if selectedPushToTalkHotkey == .controlOptionSpace {
+                selectedPushToTalkHotkey = .fnKey
+            }
+            UserDefaults.standard.set(true, forKey: Constants.dockHotkeyMigrationKey)
+        }
         applyInsertionPreferences()
 
         hotkeyController.onPress = { [weak self] in
@@ -109,6 +129,9 @@ final class AppState: ObservableObject {
         }
         hotkeyController.onRelease = { [weak self] in
             self?.finishPushToTalkRecording()
+        }
+        recorder.onLevelChange = { [weak self] level in
+            self?.audioLevel = level
         }
 
         enablePushToTalk()
@@ -396,6 +419,24 @@ final class AppState: ObservableObject {
         }
     }
 
+    func toggleDockDictation() {
+        if isRecording {
+            finishPushToTalkRecording()
+        } else {
+            startPushToTalkRecording()
+        }
+    }
+
+    func cancelDockDictation() {
+        guard isRecording else {
+            return
+        }
+
+        recorder.cancel()
+        audioLevel = 0
+        status = lastTranscript.map { .ready($0) } ?? .idle
+    }
+
     func finishPushToTalkRecording() {
         guard isRecording else {
             return
@@ -433,6 +474,7 @@ final class AppState: ObservableObject {
 
     private func stopRecording() throws {
         let url = try recorder.stop()
+        audioLevel = 0
         lastRecordingURL = url
         status = .recorded(url)
     }
@@ -445,6 +487,7 @@ final class AppState: ObservableObject {
                 try await Task.sleep(nanoseconds: 350_000_000)
                 status = .transcribing
                 let transcript = try await previewTranscriber.transcribe(audioFileURL: URL(fileURLWithPath: "/dev/null"))
+                lastRawTranscript = transcript
                 status = .ready(transcript)
             } catch {
                 status = .failed(error.localizedDescription)
@@ -468,11 +511,17 @@ final class AppState: ObservableObject {
             do {
                 status = .transcribing
                 let client = try transcriptionClient()
-                let transcript = try await client.transcribe(audioFileURL: lastRecordingURL)
-                addTranscriptToHistory(transcript)
+                let rawTranscript = try await client.transcribe(audioFileURL: lastRecordingURL)
+                let processedTranscript = postProcessTranscript(rawTranscript)
+                lastRawTranscript = rawTranscript
+                addTranscriptToHistory(
+                    processedTranscript.text,
+                    rawText: rawTranscript,
+                    learnedCorrectionsApplied: processedTranscript.appliedChanges
+                )
                 let targetName = await frontmostApplicationTracker.activateTargetForPaste()
-                let insertionResult = await insertionController.insert(transcript)
-                handleInsertionResult(insertionResult, text: transcript, targetName: targetName)
+                let insertionResult = await insertionController.insert(processedTranscript.text)
+                handleInsertionResult(insertionResult, text: processedTranscript.text, targetName: targetName)
                 hideOverlayAfterDelay()
             } catch {
                 status = .failed(error.localizedDescription)
@@ -502,6 +551,7 @@ final class AppState: ObservableObject {
         }
         recorder.discard(lastRecordingURL)
         lastRecordingURL = nil
+        lastRawTranscript = nil
         status = .idle
     }
 
@@ -550,6 +600,73 @@ final class AppState: ObservableObject {
         historyStore.clear()
     }
 
+    func openCorrectionEditorForLastTranscript() {
+        guard let currentTranscript = lastTranscript else {
+            status = .failed("No transcript is available to correct.")
+            hideOverlayAfterDelay(seconds: 3)
+            return
+        }
+
+        let originalText = lastRawTranscript ?? currentTranscript
+        CorrectionWindowController.shared.show(
+            title: "Correct & Learn",
+            originalText: originalText,
+            correctedText: currentTranscript
+        ) { [weak self] correctedText in
+            guard let self else {
+                return
+            }
+
+            self.learnCorrection(
+                originalText: originalText,
+                correctedText: correctedText,
+                backend: self.selectedBackend.rawValue,
+                model: self.selectedBackend == .whisperKit ? self.selectedWhisperModel.rawValue : nil,
+                targetApplication: self.frontmostApplicationTracker.targetName
+            )
+        }
+    }
+
+    func openScratchpad() {
+        ScratchpadWindowController.shared.show()
+    }
+
+    func openCorrectionEditor(for item: TranscriptHistoryItem) {
+        let originalText = item.rawText ?? item.text
+        CorrectionWindowController.shared.show(
+            title: "Correct History Item",
+            originalText: originalText,
+            correctedText: item.text
+        ) { [weak self] correctedText in
+            self?.learnCorrection(
+                originalText: originalText,
+                correctedText: correctedText,
+                backend: item.backend,
+                model: item.model,
+                targetApplication: self?.frontmostApplicationTracker.targetName
+            )
+        }
+    }
+
+    func savePersonalVocabulary() {
+        personalVocabulary = vocabularyStore.replace(with: personalVocabularyText)
+        personalVocabularyText = PersonalVocabularyEntry.formatLines(personalVocabulary)
+        refreshLearningStatus()
+    }
+
+    func clearLearningCorrections() {
+        correctionExamples = []
+        correctionStore.clear()
+        refreshLearningStatus()
+    }
+
+    func clearPersonalVocabulary() {
+        personalVocabulary = []
+        personalVocabularyText = ""
+        vocabularyStore.save([])
+        refreshLearningStatus()
+    }
+
     private func hideOverlayAfterDelay(seconds: UInt64 = 2) {
         Task {
             try? await Task.sleep(nanoseconds: seconds * 1_000_000_000)
@@ -564,6 +681,50 @@ final class AppState: ObservableObject {
                 break
             }
         }
+    }
+
+    private func learnCorrection(
+        originalText: String,
+        correctedText: String,
+        backend: String,
+        model: String?,
+        targetApplication: String?
+    ) {
+        let original = originalText.trimmedForLearning
+        let corrected = correctedText.trimmedForLearning
+
+        guard !corrected.isEmpty else {
+            status = .failed("Corrected transcript cannot be empty.")
+            hideOverlayAfterDelay(seconds: 3)
+            return
+        }
+
+        guard original != corrected else {
+            status = .ready(corrected)
+            return
+        }
+
+        let example = CorrectionExample(
+            originalText: original,
+            correctedText: corrected,
+            backend: backend,
+            model: model,
+            targetApplication: targetApplication
+        )
+        correctionExamples = correctionStore.add(example, to: correctionExamples)
+        personalVocabulary = vocabularyStore.addSuggestedPhrases(from: corrected, to: personalVocabulary)
+        personalVocabularyText = PersonalVocabularyEntry.formatLines(personalVocabulary)
+        lastRawTranscript = original
+
+        addTranscriptToHistory(
+            corrected,
+            rawText: original,
+            learnedCorrectionsApplied: ["Manual correction"],
+            backend: backend,
+            model: model
+        )
+        status = .ready(corrected)
+        refreshLearningStatus()
     }
 
     func requestAccessibilityPermission() {
@@ -623,16 +784,44 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func addTranscriptToHistory(_ text: String) {
+    private func postProcessTranscript(_ rawTranscript: String) -> ProcessedTranscript {
+        let processed = TranscriptPostProcessor(
+            vocabulary: personalVocabulary,
+            correctionExamples: correctionExamples
+        ).process(rawTranscript)
+
+        if processed.appliedChanges.isEmpty {
+            refreshLearningStatus()
+        } else {
+            learningStatusText = "Learning: applied \(processed.appliedChanges.count) fix(es)"
+        }
+
+        return processed
+    }
+
+    private func refreshLearningStatus() {
+        learningStatusText = "Learning: \(correctionExamples.count) corrections, \(personalVocabulary.count) vocabulary terms"
+    }
+
+    private func addTranscriptToHistory(
+        _ text: String,
+        rawText: String? = nil,
+        learnedCorrectionsApplied: [String] = [],
+        backend: String? = nil,
+        model: String? = nil
+    ) {
         let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedText.isEmpty else {
             return
         }
 
+        let trimmedRawText = rawText?.trimmedForLearning
         let item = TranscriptHistoryItem(
             text: trimmedText,
-            backend: selectedBackend.rawValue,
-            model: selectedBackend == .whisperKit ? selectedWhisperModel.rawValue : nil
+            rawText: trimmedRawText == trimmedText ? nil : trimmedRawText,
+            learnedCorrectionsApplied: learnedCorrectionsApplied,
+            backend: backend ?? selectedBackend.rawValue,
+            model: model ?? (selectedBackend == .whisperKit ? selectedWhisperModel.rawValue : nil)
         )
         transcriptHistory = historyStore.add(item, to: transcriptHistory)
     }

@@ -18,7 +18,7 @@ final class TranscriptHistoryStore {
             return []
         }
 
-        return (try? JSONDecoder().decode([TranscriptHistoryItem].self, from: data)) ?? []
+        return (try? JSONDecoder.voiceTypeMini.decode([TranscriptHistoryItem].self, from: data)) ?? []
     }
 
     func save(_ items: [TranscriptHistoryItem]) {
@@ -49,5 +49,13 @@ private extension JSONEncoder {
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         return encoder
+    }
+}
+
+private extension JSONDecoder {
+    static var voiceTypeMini: JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
     }
 }
