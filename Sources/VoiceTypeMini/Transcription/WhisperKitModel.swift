@@ -7,6 +7,10 @@ enum WhisperKitModel: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    static var selectableCases: [WhisperKitModel] {
+        [.base]
+    }
+
     var displayName: String {
         switch self {
         case .tiny:

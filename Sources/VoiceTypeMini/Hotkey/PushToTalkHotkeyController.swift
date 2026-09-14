@@ -123,6 +123,7 @@ final class PushToTalkHotkeyController {
     private var eventHandlerRef: EventHandlerRef?
     private var fnEventTap: CFMachPort?
     private var fnEventTapSource: CFRunLoopSource?
+    private var fnPollTimer: Timer?
     private var isPressed = false
     private(set) var activeHotkey: Hotkey?
 
@@ -130,7 +131,7 @@ final class PushToTalkHotkeyController {
     var onRelease: (() -> Void)?
 
     var isEnabled: Bool {
-        hotkeyRef != nil || fnEventTap != nil
+        hotkeyRef != nil || fnEventTap != nil || fnPollTimer != nil
     }
 
     func start(hotkey: Hotkey) throws {
@@ -200,12 +201,14 @@ final class PushToTalkHotkeyController {
             UnregisterEventHotKey(hotkeyRef)
         }
 
+        fnPollTimer?.invalidate()
         if let eventHandlerRef {
             RemoveEventHandler(eventHandlerRef)
         }
 
         fnEventTap = nil
         fnEventTapSource = nil
+        fnPollTimer = nil
         hotkeyRef = nil
         eventHandlerRef = nil
         isPressed = false
@@ -231,8 +234,7 @@ final class PushToTalkHotkeyController {
         }
     }
 
-    fileprivate func handleFnFlagsChanged(flags: CGEventFlags) {
-        let isFnDown = flags.contains(.maskSecondaryFn)
+    fileprivate func handleFnKeyState(isFnDown: Bool) {
         if isFnDown {
             guard !isPressed else {
                 return
@@ -265,19 +267,41 @@ final class PushToTalkHotkeyController {
             callback: fnKeyEventHandler,
             userInfo: refcon
         ) else {
-            throw HotkeyError.eventTapFailed(hotkey)
+            startFnPollingFallback()
+            activeHotkey = hotkey
+            return
         }
 
         guard let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0) else {
             CFMachPortInvalidate(eventTap)
-            throw HotkeyError.eventTapFailed(hotkey)
+            startFnPollingFallback()
+            activeHotkey = hotkey
+            return
         }
 
         fnEventTap = eventTap
         fnEventTapSource = runLoopSource
         CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
         CGEvent.tapEnable(tap: eventTap, enable: true)
+        startFnPollingFallback()
         activeHotkey = hotkey
+    }
+
+    private func startFnPollingFallback() {
+        fnPollTimer?.invalidate()
+
+        let timer = Timer(timeInterval: 0.03, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                let isFnDown = CGEventSource.keyState(
+                    .hidSystemState,
+                    key: CGKeyCode(kVK_Function)
+                )
+                self?.handleFnKeyState(isFnDown: isFnDown)
+            }
+        }
+
+        fnPollTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 }
 
@@ -327,9 +351,14 @@ private func fnKeyEventHandler(
         return Unmanaged.passUnretained(event)
     }
 
-    let flags = event.flags
+    let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+    guard keyCode == Int64(kVK_Function) else {
+        return Unmanaged.passUnretained(event)
+    }
+
+    let isFnDown = event.flags.contains(.maskSecondaryFn)
     DispatchQueue.main.async {
-        controller.handleFnFlagsChanged(flags: flags)
+        controller.handleFnKeyState(isFnDown: isFnDown)
     }
 
     return Unmanaged.passUnretained(event)

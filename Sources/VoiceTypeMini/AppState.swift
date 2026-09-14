@@ -13,6 +13,9 @@ final class AppState: ObservableObject {
         static let preserveClipboardKey = "preserve-clipboard"
         static let pushToTalkHotkeyKey = "push-to-talk-hotkey"
         static let dockHotkeyMigrationKey = "dock-hotkey-migration-v1"
+        static let smartDictationEnabledKey = "smart-dictation-enabled"
+        static let nearbyTextContextEnabledKey = "nearby-text-context-enabled"
+        static let automaticEditLearningEnabledKey = "automatic-edit-learning-enabled"
     }
 
     enum Status: Equatable {
@@ -45,6 +48,24 @@ final class AppState: ObservableObject {
         }
     }
     @Published var openAIAPIKey: String = ""
+    @Published var isSmartDictationEnabled: Bool = false {
+        didSet {
+            UserDefaults.standard.set(isSmartDictationEnabled, forKey: Constants.smartDictationEnabledKey)
+            refreshSmartDictationStatus()
+        }
+    }
+    @Published var isNearbyTextContextEnabled: Bool = false {
+        didSet {
+            UserDefaults.standard.set(isNearbyTextContextEnabled, forKey: Constants.nearbyTextContextEnabledKey)
+            refreshSmartDictationStatus()
+        }
+    }
+    @Published var isAutomaticEditLearningEnabled: Bool = true {
+        didSet {
+            UserDefaults.standard.set(isAutomaticEditLearningEnabled, forKey: Constants.automaticEditLearningEnabledKey)
+            refreshLearningStatus()
+        }
+    }
     @Published var selectedInsertionMode: TextInsertionController.InsertionMode = .automatic {
         didSet {
             insertionController.insertionMode = selectedInsertionMode
@@ -74,6 +95,7 @@ final class AppState: ObservableObject {
     @Published private(set) var personalVocabulary: [PersonalVocabularyEntry] = []
     @Published var personalVocabularyText: String = ""
     @Published private(set) var learningStatusText: String = "Learning: no corrections yet"
+    @Published private(set) var smartDictationStatusText: String = "Smart dictation: ready"
     @Published private(set) var whisperKitStatusText: String = "WhisperKit: preparing local model"
     @Published var isDockExpanded: Bool = false
     @Published private(set) var audioLevel: Double = 0
@@ -84,15 +106,24 @@ final class AppState: ObservableObject {
     private let hotkeyController = PushToTalkHotkeyController()
     private let insertionController = TextInsertionController()
     private let frontmostApplicationTracker = FrontmostApplicationTracker()
+    private let focusedTextContextReader = FocusedTextContextReader()
     private let launchAtLoginController = LaunchAtLoginController()
     private let historyStore = TranscriptHistoryStore()
     private let correctionStore = CorrectionLearningStore()
     private let vocabularyStore = PersonalVocabularyStore()
     private var lastRecordingURL: URL?
     private var lastRawTranscript: String?
+    private var lastFocusedTextContext: FocusedTextContext?
     private var appActivationObserver: NSObjectProtocol?
+    #if DEBUG
+    private var insertionTestObserver: NSObjectProtocol?
+    #endif
+    private var recordingStartTask: Task<Void, Never>?
+    private var recordingStartGeneration = 0
+    private var shouldFinishWhenRecordingStarts = false
     private var transcriptionTask: Task<Void, Never>?
     private var transcriptionTimeoutTask: Task<Void, Never>?
+    private var pasteEditLearningTask: Task<Void, Never>?
     private var transcriptionGeneration = 0
 
     init() {
@@ -104,19 +135,31 @@ final class AppState: ObservableObject {
         correctionExamples = correctionStore.load()
         personalVocabulary = vocabularyStore.load()
         personalVocabularyText = PersonalVocabularyEntry.formatLines(personalVocabulary)
+        isSmartDictationEnabled = UserDefaults.standard.object(forKey: Constants.smartDictationEnabledKey)
+            .map { _ in UserDefaults.standard.bool(forKey: Constants.smartDictationEnabledKey) } ?? false
+        isNearbyTextContextEnabled = UserDefaults.standard.object(forKey: Constants.nearbyTextContextEnabledKey)
+            .map { _ in UserDefaults.standard.bool(forKey: Constants.nearbyTextContextEnabledKey) } ?? false
+        isAutomaticEditLearningEnabled = UserDefaults.standard.object(forKey: Constants.automaticEditLearningEnabledKey)
+            .map { _ in UserDefaults.standard.bool(forKey: Constants.automaticEditLearningEnabledKey) } ?? true
         refreshLearningStatus()
+        refreshSmartDictationStatus()
         whisperKitTranscriber.onPreparationStatusChange = { [weak self] status in
             self?.whisperKitStatusText = status
         }
         if let savedBackend = UserDefaults.standard.string(forKey: Constants.backendKey),
-           let backend = TranscriptionBackend(rawValue: savedBackend) {
+           let backend = TranscriptionBackend(rawValue: savedBackend),
+           TranscriptionBackend.selectableCases.contains(backend) {
             selectedBackend = backend
+        } else {
+            selectedBackend = .whisperKit
         }
         if let savedModel = UserDefaults.standard.string(forKey: Constants.whisperModelKey),
-           let model = WhisperKitModel(rawValue: savedModel) {
+           let model = WhisperKitModel(rawValue: savedModel),
+           WhisperKitModel.selectableCases.contains(model) {
             selectedWhisperModel = model
             whisperKitTranscriber.setModel(model.rawValue)
         } else {
+            selectedWhisperModel = .base
             whisperKitTranscriber.setModel(selectedWhisperModel.rawValue)
         }
         whisperKitTranscriber.warmUp()
@@ -152,6 +195,13 @@ final class AppState: ObservableObject {
         refreshInsertionStatus()
         refreshLaunchAtLoginStatus()
 
+        if !insertionController.permissionHealth.canAutoInsert {
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                self?.insertionController.requestPastePermissionPrompt()
+            }
+        }
+
         appActivationObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didBecomeActiveNotification,
             object: nil,
@@ -161,6 +211,16 @@ final class AppState: ObservableObject {
                 self?.retryPushToTalkIfNeeded()
             }
         }
+
+        #if DEBUG
+        insertionTestObserver = DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("com.local.voicetypemini.test-insertion"),
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.testInsertion() }
+        }
+        #endif
     }
 
     var isRecording: Bool {
@@ -174,6 +234,7 @@ final class AppState: ObservableObject {
         default:
             return false
         }
+
     }
 
     var overlayTitle: String {
@@ -406,6 +467,7 @@ final class AppState: ObservableObject {
                 )
                 openAIAPIKey = trimmedKey
             }
+            refreshSmartDictationStatus()
             status = .idle
         } catch {
             status = .failed(error.localizedDescription)
@@ -428,10 +490,34 @@ final class AppState: ObservableObject {
     }
 
     func startPushToTalkRecording() {
-        Task {
+        guard recordingStartTask == nil else {
+            return
+        }
+
+        shouldFinishWhenRecordingStarts = false
+        recordingStartGeneration += 1
+        let generation = recordingStartGeneration
+        recordingStartTask = Task { [weak self] in
+            guard let self else {
+                return
+            }
+
+            defer {
+                if self.recordingStartGeneration == generation {
+                    self.recordingStartTask = nil
+                }
+            }
+
             do {
                 try await startRecording()
+                guard !Task.isCancelled, recordingStartGeneration == generation else { return }
+                if shouldFinishWhenRecordingStarts {
+                    shouldFinishWhenRecordingStarts = false
+                    finishPushToTalkRecording()
+                }
             } catch {
+                guard !Task.isCancelled, recordingStartGeneration == generation else { return }
+                shouldFinishWhenRecordingStarts = false
                 status = .failed(error.localizedDescription)
             }
         }
@@ -446,17 +532,26 @@ final class AppState: ObservableObject {
     }
 
     func cancelDockDictation() {
-        guard isRecording else {
+        guard isRecording || recordingStartTask != nil else {
             return
         }
 
+        shouldFinishWhenRecordingStarts = false
+        recordingStartGeneration += 1
+        recordingStartTask?.cancel()
+        recordingStartTask = nil
         recorder.cancel()
         audioLevel = 0
         status = lastTranscript.map { .ready($0) } ?? .idle
     }
 
     func finishPushToTalkRecording() {
-        guard isRecording else {
+        if recordingStartTask != nil, !recorder.isRecording {
+            shouldFinishWhenRecordingStarts = true
+            return
+        }
+
+        guard isRecording, recorder.isRecording else {
             return
         }
 
@@ -475,6 +570,7 @@ final class AppState: ObservableObject {
         cancelActiveTranscription()
 
         frontmostApplicationTracker.captureCurrentFrontmostApplication()
+        captureFocusedTextContextIfNeeded()
         refreshPasteTargetStatus()
 
         let previousRecordingURL = lastRecordingURL
@@ -485,6 +581,7 @@ final class AppState: ObservableObject {
             try await recorder.start()
             recorder.discard(previousRecordingURL)
         } catch {
+            guard !Task.isCancelled else { throw error }
             lastRecordingURL = previousRecordingURL
             status = previousRecordingURL.map { .recorded($0) } ?? .idle
             throw error
@@ -553,16 +650,29 @@ final class AppState: ObservableObject {
                 guard !Task.isCancelled, self.transcriptionGeneration == generation else {
                     return
                 }
-                let processedTranscript = postProcessTranscript(rawTranscript)
+                let processedTranscript = await postProcessTranscript(rawTranscript)
+                guard !Task.isCancelled, self.transcriptionGeneration == generation else { return }
                 lastRawTranscript = rawTranscript
                 addTranscriptToHistory(
                     processedTranscript.text,
                     rawText: rawTranscript,
                     learnedCorrectionsApplied: processedTranscript.appliedChanges
                 )
-                let targetName = await frontmostApplicationTracker.activateTargetForPaste()
-                let insertionResult = await insertionController.insert(processedTranscript.text)
+                let target = await frontmostApplicationTracker.activateTargetForPaste()
+                guard !Task.isCancelled, self.transcriptionGeneration == generation else { return }
+                let targetName = target?.name
+                let insertionResult = await insertionController.insert(
+                    processedTranscript.text,
+                    targetProcessIdentifier: target?.processIdentifier
+                )
+                guard !Task.isCancelled, self.transcriptionGeneration == generation else { return }
                 handleInsertionResult(insertionResult, text: processedTranscript.text, targetName: targetName)
+                schedulePasteEditLearning(
+                    insertedText: processedTranscript.text,
+                    targetName: targetName,
+                    targetProcessIdentifier: target?.processIdentifier,
+                    insertionResult: insertionResult
+                )
                 hideOverlayAfterDelay()
             } catch {
                 guard !Task.isCancelled, self.transcriptionGeneration == generation else {
@@ -585,11 +695,12 @@ final class AppState: ObservableObject {
             }
             return OpenAITranscriptionClient(apiKey: apiKey)
         case .appleSpeech:
-            throw AppError.appleSpeechNotImplemented
+            return AppleSpeechTranscriptionClient()
         }
     }
 
     func reset() {
+        cancelDockDictation()
         cancelActiveTranscription()
         if recorder.isRecording {
             recorder.cancel()
@@ -608,9 +719,15 @@ final class AppState: ObservableObject {
 
     func pasteTranscript(_ item: TranscriptHistoryItem) {
         Task {
-            let targetName = await frontmostApplicationTracker.activateTargetForPaste()
-            let result = await insertionController.insert(item.text)
+            let target = await frontmostApplicationTracker.activateTargetForPaste()
+            let targetName = target?.name
+            let result = await insertionController.insert(
+                item.text,
+                targetProcessIdentifier: target?.processIdentifier
+            )
             handleInsertionResult(result, text: item.text, targetName: targetName)
+            schedulePasteEditLearning(insertedText: item.text, targetName: targetName,
+                                      targetProcessIdentifier: target?.processIdentifier, insertionResult: result)
             hideOverlayAfterDelay()
         }
     }
@@ -623,9 +740,15 @@ final class AppState: ObservableObject {
         }
 
         Task {
-            let targetName = await frontmostApplicationTracker.activateTargetForPaste()
-            let result = await insertionController.insert(lastTranscript)
+            let target = await frontmostApplicationTracker.activateTargetForPaste()
+            let targetName = target?.name
+            let result = await insertionController.insert(
+                lastTranscript,
+                targetProcessIdentifier: target?.processIdentifier
+            )
             handleInsertionResult(result, text: lastTranscript, targetName: targetName)
+            schedulePasteEditLearning(insertedText: lastTranscript, targetName: targetName,
+                                      targetProcessIdentifier: target?.processIdentifier, insertionResult: result)
             hideOverlayAfterDelay()
         }
     }
@@ -633,8 +756,12 @@ final class AppState: ObservableObject {
     func testInsertion() {
         Task {
             let testText = "VoiceTypeMini insertion test"
-            let targetName = await frontmostApplicationTracker.activateTargetForPaste()
-            let result = await insertionController.insert(testText)
+            let target = await frontmostApplicationTracker.activateTargetForPaste()
+            let targetName = target?.name
+            let result = await insertionController.insert(
+                testText,
+                targetProcessIdentifier: target?.processIdentifier
+            )
             handleInsertionResult(result, text: testText, targetName: targetName)
             hideOverlayAfterDelay()
         }
@@ -697,12 +824,14 @@ final class AppState: ObservableObject {
         personalVocabulary = vocabularyStore.replace(with: personalVocabularyText)
         personalVocabularyText = PersonalVocabularyEntry.formatLines(personalVocabulary)
         refreshLearningStatus()
+        refreshSmartDictationStatus()
     }
 
     func clearLearningCorrections() {
         correctionExamples = []
         correctionStore.clear()
         refreshLearningStatus()
+        refreshSmartDictationStatus()
     }
 
     func clearPersonalVocabulary() {
@@ -710,6 +839,7 @@ final class AppState: ObservableObject {
         personalVocabularyText = ""
         vocabularyStore.save([])
         refreshLearningStatus()
+        refreshSmartDictationStatus()
     }
 
     private func hideOverlayAfterDelay(seconds: UInt64 = 2) {
@@ -772,12 +902,89 @@ final class AppState: ObservableObject {
         refreshLearningStatus()
     }
 
+    private func schedulePasteEditLearning(
+        insertedText: String,
+        targetName: String?,
+        targetProcessIdentifier: pid_t?,
+        insertionResult: TextInsertionController.InsertionResult
+    ) {
+        pasteEditLearningTask?.cancel()
+        guard isAutomaticEditLearningEnabled,
+              insertionResult == .insertedDirectly || insertionResult == .sentPasteShortcut,
+              let targetProcessIdentifier,
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == targetProcessIdentifier,
+              let originalContext = focusedTextContextReader.snapshot(),
+              originalContext.fieldText.contains(insertedText.trimmedForLearning) else {
+            return
+        }
+
+        // Capture the field immediately after insertion. Never learn from a different
+        // document just because its text happens to resemble the pasted transcript.
+        let originalText = insertedText.trimmedForLearning
+        let backend = selectedBackend.rawValue
+        let model = selectedBackend == .whisperKit ? selectedWhisperModel.rawValue : nil
+        let targetApplication = targetName
+        pasteEditLearningTask = Task { [weak self] in
+            for delay in [8_000_000_000, 18_000_000_000] {
+                try? await Task.sleep(nanoseconds: UInt64(delay))
+                guard let self, !Task.isCancelled, self.isAutomaticEditLearningEnabled,
+                      NSWorkspace.shared.frontmostApplication?.processIdentifier == targetProcessIdentifier,
+                      let currentContext = self.focusedTextContextReader.snapshot(),
+                      currentContext.isSameField(as: originalContext) else { return }
+
+                guard let correctedText = PasteEditLearningDetector.correctedText(
+                    originalFieldText: originalContext.fieldText,
+                    currentFieldText: currentContext.fieldText,
+                    insertedText: originalText
+                ) else { continue }
+
+                self.learnAutomaticPasteEdit(
+                    originalText: originalText, correctedText: correctedText,
+                    backend: backend, model: model, targetApplication: targetApplication
+                )
+                return
+            }
+        }
+    }
+
+    private func learnAutomaticPasteEdit(
+        originalText: String,
+        correctedText: String,
+        backend: String,
+        model: String?,
+        targetApplication: String?
+    ) {
+        let original = originalText.trimmedForLearning
+        let corrected = correctedText.trimmedForLearning
+
+        guard !original.isEmpty,
+              !corrected.isEmpty,
+              original != corrected else {
+            return
+        }
+
+        let example = CorrectionExample(
+            originalText: original,
+            correctedText: corrected,
+            backend: backend,
+            model: model,
+            targetApplication: targetApplication
+        )
+        correctionExamples = correctionStore.add(example, to: correctionExamples)
+        personalVocabulary = vocabularyStore.addSuggestedPhrases(from: corrected, to: personalVocabulary)
+        personalVocabularyText = PersonalVocabularyEntry.formatLines(personalVocabulary)
+        learningStatusText = "Learning: learned from your last edit"
+        refreshSmartDictationStatus()
+    }
+
     private func cancelActiveTranscription() {
         transcriptionGeneration += 1
         transcriptionTimeoutTask?.cancel()
         transcriptionTimeoutTask = nil
         transcriptionTask?.cancel()
         transcriptionTask = nil
+        pasteEditLearningTask?.cancel()
+        pasteEditLearningTask = nil
     }
 
     private func scheduleTranscriptionTimeout(for generation: Int, seconds: UInt64) {
@@ -844,6 +1051,18 @@ final class AppState: ObservableObject {
         text: String,
         targetName: String?
     ) {
+        #if DEBUG
+        UserDefaults.standard.set(String(describing: result), forKey: "debug-last-insertion-result")
+        UserDefaults.standard.set(
+            insertionController.permissionHealth.accessibilityEnabled,
+            forKey: "debug-accessibility-enabled"
+        )
+        UserDefaults.standard.set(
+            insertionController.permissionHealth.eventPostingEnabled,
+            forKey: "debug-event-posting-enabled"
+        )
+        #endif
+
         if let targetName {
             pasteTargetStatusText = "Paste target: \(targetName)"
         } else {
@@ -851,6 +1070,8 @@ final class AppState: ObservableObject {
         }
 
         switch result {
+        case .cancelled:
+            return
         case .insertedDirectly:
             status = .pasted(text)
             insertionStatusText = targetName.map { "Paste: inserted in \($0)" } ?? "Paste: inserted directly"
@@ -860,15 +1081,27 @@ final class AppState: ObservableObject {
         case .copied:
             status = .copied(text)
             insertionStatusText = "Paste: copied only - enable Auto-Paste"
+        case let .autoPasteUnavailable(message):
+            status = .copied(text)
+            insertionStatusText = "Paste: \(message)"
         }
     }
 
-    private func postProcessTranscript(_ rawTranscript: String) -> ProcessedTranscript {
-        let processed = TranscriptPostProcessor(
+    private func postProcessTranscript(_ rawTranscript: String) async -> ProcessedTranscript {
+        var processed = TranscriptPostProcessor(
             vocabulary: personalVocabulary,
             correctionExamples: correctionExamples
         ).process(rawTranscript)
 
+        if let refined = await refineTranscriptIfNeeded(processed.text), !Task.isCancelled {
+            var appliedChanges = processed.appliedChanges
+            if refined != processed.text {
+                appliedChanges.append("Smart dictation cleanup")
+            }
+            processed = ProcessedTranscript(text: refined, appliedChanges: appliedChanges)
+        }
+
+        guard !Task.isCancelled else { return processed }
         if processed.appliedChanges.isEmpty {
             refreshLearningStatus()
         } else {
@@ -878,8 +1111,93 @@ final class AppState: ObservableObject {
         return processed
     }
 
+    private func refineTranscriptIfNeeded(_ transcript: String) async -> String? {
+        guard isSmartDictationEnabled else {
+            smartDictationStatusText = "Smart dictation: off"
+            return nil
+        }
+
+        let apiKey = openAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !apiKey.isEmpty else {
+            smartDictationStatusText = "Smart dictation: add OpenAI key to enable context cleanup"
+            return nil
+        }
+
+        do {
+            smartDictationStatusText = "Smart dictation: cleaning with context"
+            let context = SmartTranscriptContext(
+                backend: selectedBackend.rawValue,
+                model: selectedBackend == .whisperKit ? selectedWhisperModel.rawValue : nil,
+                targetApplication: frontmostApplicationTracker.targetName,
+                targetAppCategory: targetAppCategory(for: frontmostApplicationTracker.targetName),
+                focusedTextContext: isNearbyTextContextEnabled ? lastFocusedTextContext : nil,
+                vocabulary: personalVocabulary,
+                correctionExamples: correctionExamples
+            )
+            let refined = try await SmartTranscriptRefiner(apiKey: apiKey).refine(transcript, context: context)
+            guard !Task.isCancelled else { return nil }
+            smartDictationStatusText = "Smart dictation: context cleanup applied"
+            return refined
+        } catch {
+            guard !Task.isCancelled else { return nil }
+            smartDictationStatusText = "Smart dictation: fallback used; check OpenAI key or network"
+            return nil
+        }
+    }
+
     private func refreshLearningStatus() {
         learningStatusText = "Learning: \(correctionExamples.count) corrections, \(personalVocabulary.count) vocabulary terms"
+    }
+
+    private func refreshSmartDictationStatus() {
+        if !isSmartDictationEnabled {
+            smartDictationStatusText = "Smart dictation: off"
+        } else if openAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            smartDictationStatusText = "Smart dictation: add OpenAI key to enable context cleanup"
+        } else {
+            smartDictationStatusText = isNearbyTextContextEnabled
+                ? "Smart dictation: ready with nearby text context"
+                : "Smart dictation: ready without nearby text context"
+        }
+    }
+
+    private func captureFocusedTextContextIfNeeded() {
+        guard isSmartDictationEnabled, isNearbyTextContextEnabled else {
+            lastFocusedTextContext = nil
+            return
+        }
+
+        lastFocusedTextContext = focusedTextContextReader.snapshot()?.context
+    }
+
+    private func targetAppCategory(for appName: String?) -> String {
+        let name = appName?.lowercased() ?? ""
+
+        if ["slack", "messages", "whatsapp", "telegram", "discord", "teams"].contains(where: name.contains) {
+            return "messaging"
+        }
+
+        if ["mail", "outlook", "gmail", "spark"].contains(where: name.contains) {
+            return "email"
+        }
+
+        if ["notes", "notion", "word", "pages", "docs", "obsidian"].contains(where: name.contains) {
+            return "docs"
+        }
+
+        if ["xcode", "visual studio code", "cursor", "terminal", "iterm"].contains(where: name.contains) {
+            return "code"
+        }
+
+        if ["chatgpt", "claude", "perplexity"].contains(where: name.contains) {
+            return "ai-chat"
+        }
+
+        if ["safari", "chrome", "arc", "firefox", "edge"].contains(where: name.contains) {
+            return "browser"
+        }
+
+        return "general"
     }
 
     private func addTranscriptToHistory(
@@ -921,14 +1239,11 @@ final class AppState: ObservableObject {
 
 private enum AppError: LocalizedError {
     case missingOpenAIAPIKey
-    case appleSpeechNotImplemented
 
     var errorDescription: String? {
         switch self {
         case .missingOpenAIAPIKey:
             return "Add your OpenAI API key in Settings first."
-        case .appleSpeechNotImplemented:
-            return "Apple Speech is not wired yet. Choose WhisperKit or OpenAI in Settings."
         }
     }
 }

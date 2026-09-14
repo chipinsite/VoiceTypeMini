@@ -55,6 +55,8 @@ final class AudioRecorder {
             throw RecorderError.microphoneDenied
         }
 
+        try Task.checkCancellation()
+
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("VoiceTypeMini-\(UUID().uuidString)")
             .appendingPathExtension("m4a")

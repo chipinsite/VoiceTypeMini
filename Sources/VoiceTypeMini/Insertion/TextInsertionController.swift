@@ -5,9 +5,11 @@ import Foundation
 @MainActor
 final class TextInsertionController {
     enum InsertionResult: Equatable {
+        case cancelled
         case insertedDirectly
         case sentPasteShortcut
         case copied
+        case autoPasteUnavailable(String)
     }
 
     struct PermissionHealth: Equatable {
@@ -54,6 +56,7 @@ final class TextInsertionController {
     private let focusedApplicationAttribute = kAXFocusedApplicationAttribute as CFString
     private let focusedElementAttribute = "AXFocusedUIElement" as CFString
     private let selectedTextRangeAttribute = "AXSelectedTextRange" as CFString
+    private let selectedTextAttribute = "AXSelectedText" as CFString
     private let valueAttribute = "AXValue" as CFString
     private let transientPasteboardTypes: [NSPasteboard.PasteboardType] = [
         NSPasteboard.PasteboardType("org.nspasteboard.TransientType"),
@@ -80,10 +83,17 @@ final class TextInsertionController {
         permissionHealth.summary
     }
 
-    func insert(_ text: String) async -> InsertionResult {
+    func insert(_ text: String, targetProcessIdentifier: pid_t?) async -> InsertionResult {
+        guard !Task.isCancelled else { return .cancelled }
         let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedText.isEmpty else {
             return .copied
+        }
+
+        guard let targetProcessIdentifier,
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == targetProcessIdentifier else {
+            copyToPasteboard(trimmedText)
+            return .autoPasteUnavailable("Could not return focus to the dictation app. Transcript copied instead.")
         }
 
         if insertionMode == .automatic,
@@ -96,8 +106,21 @@ final class TextInsertionController {
             return .copied
         }
 
-        try? await Task.sleep(nanoseconds: 80_000_000)
-        postCommandV()
+        guard CGPreflightPostEventAccess() else {
+            return .autoPasteUnavailable("macOS blocked Auto-Paste. Transcript copied; enable Accessibility for VoiceTypeMini.")
+        }
+
+        try? await Task.sleep(nanoseconds: 120_000_000)
+        guard !Task.isCancelled else {
+            schedulePasteboardRestore(pendingRestore)
+            return .cancelled
+        }
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == targetProcessIdentifier else {
+            return .autoPasteUnavailable("Focus changed before pasting. Transcript copied instead.")
+        }
+        guard await postCommandV() else {
+            return .autoPasteUnavailable("Could not create the paste command. Transcript copied instead.")
+        }
         if shouldPreserveClipboard {
             schedulePasteboardRestore(pendingRestore)
         }
@@ -118,7 +141,39 @@ final class TextInsertionController {
             return false
         }
 
+        if replaceSelectedText(focusedElement, with: text) {
+            return true
+        }
+
         return replaceFocusedElementValue(focusedElement, with: text)
+    }
+
+    private func replaceSelectedText(_ element: AXUIElement, with text: String) -> Bool {
+        var selectedTextIsSettable = DarwinBoolean(false)
+        guard AXUIElementIsAttributeSettable(
+            element,
+            selectedTextAttribute,
+            &selectedTextIsSettable
+        ) == .success,
+              selectedTextIsSettable.boolValue else {
+            return false
+        }
+
+        let previousValue = elementValue(element)
+        guard AXUIElementSetAttributeValue(
+            element,
+            selectedTextAttribute,
+            text as CFString
+        ) == .success else {
+            return false
+        }
+
+        // Some web-based controls do not expose AXValue even though AXSelectedText
+        // insertion works. When a value is available, make sure it actually changed.
+        guard let previousValue else {
+            return true
+        }
+        return elementValue(element) != previousValue
     }
 
     private var focusedElement: AXUIElement? {
@@ -167,7 +222,8 @@ final class TextInsertionController {
         }
 
         let nextValue = currentValue.replacingCharacters(in: range, with: text)
-        guard AXUIElementSetAttributeValue(element, valueAttribute, nextValue as CFString) == .success else {
+        guard AXUIElementSetAttributeValue(element, valueAttribute, nextValue as CFString) == .success,
+              elementValue(element) == nextValue else {
             return false
         }
 
@@ -234,17 +290,34 @@ final class TextInsertionController {
         return start..<end
     }
 
-    private func postCommandV() {
+    private func elementValue(_ element: AXUIElement) -> String? {
+        var valueRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, valueAttribute, &valueRef) == .success else {
+            return nil
+        }
+        return valueRef as? String
+    }
+
+    private func postCommandV() async -> Bool {
         let keyCodeForV = CGKeyCode(9)
-        let source = CGEventSource(stateID: .hidSystemState)
-        let keyDown = CGEvent(keyboardEventSource: source, virtualKey: keyCodeForV, keyDown: true)
-        let keyUp = CGEvent(keyboardEventSource: source, virtualKey: keyCodeForV, keyDown: false)
+        guard let source = CGEventSource(stateID: .combinedSessionState),
+              let keyDown = CGEvent(keyboardEventSource: source, virtualKey: keyCodeForV, keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: source, virtualKey: keyCodeForV, keyDown: false) else {
+            return false
+        }
 
-        keyDown?.flags = .maskCommand
-        keyUp?.flags = .maskCommand
+        keyDown.flags = .maskCommand
+        keyUp.flags = .maskCommand
 
-        keyDown?.post(tap: .cgSessionEventTap)
-        keyUp?.post(tap: .cgSessionEventTap)
+        keyDown.post(tap: .cghidEventTap)
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        keyUp.post(tap: .cghidEventTap)
+        return true
+    }
+
+    private func copyToPasteboard(_ text: String) {
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
     }
 
     private func writeTranscriptToPasteboard(_ text: String) -> PendingPasteboardRestore? {
