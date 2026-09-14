@@ -168,7 +168,6 @@ final class WhisperKitTranscriptionClient: TranscriptionClient {
         }
 
         let modelNeedle = model.lowercased()
-        var fallback: URL?
         let keys: Set<URLResourceKey> = [.isDirectoryKey, .isHiddenKey]
         let enumerator = FileManager.default.enumerator(
             at: root,
@@ -177,6 +176,10 @@ final class WhisperKitTranscriptionClient: TranscriptionClient {
         )
 
         while let candidate = enumerator?.nextObject() as? URL {
+            if candidate.pathComponents.contains(where: { $0.hasPrefix(".") }) {
+                continue
+            }
+
             guard let values = try? candidate.resourceValues(forKeys: keys),
                   values.isDirectory == true,
                   values.isHidden != true,
@@ -188,11 +191,9 @@ final class WhisperKitTranscriptionClient: TranscriptionClient {
             if name == modelNeedle || name.contains(modelNeedle) {
                 return candidate
             }
-
-            fallback = fallback ?? candidate
         }
 
-        return fallback
+        return nil
     }
 
     private static func isCompleteModelFolder(_ folder: URL) -> Bool {

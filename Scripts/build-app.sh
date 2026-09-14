@@ -72,6 +72,7 @@ copy_resource_bundles "$ROOT_DIR/.build/arm64-apple-macosx/release"
 WHISPERKIT_MODELS_SOURCE="${VOICE_TYPE_WHISPERKIT_MODELS_DIR:-$ROOT_DIR/WhisperKitModels}"
 if [[ -d "$WHISPERKIT_MODELS_SOURCE" ]]; then
   ditto --noextattr --noqtn "$WHISPERKIT_MODELS_SOURCE" "$RESOURCES_DIR/WhisperKitModels"
+  find "$RESOURCES_DIR/WhisperKitModels" -type d -name ".cache" -prune -exec rm -rf {} +
 fi
 
 chmod +x "$MACOS_DIR/VoiceTypeMini"
@@ -93,8 +94,15 @@ fi
 SIGN_IDENTITY="${SIGN_IDENTITY:--}"
 
 SIGN_ARGS=(--force --sign "$SIGN_IDENTITY")
+APP_SIGN_ARGS=("${SIGN_ARGS[@]}")
 if [[ "$SIGN_IDENTITY" != "-" ]]; then
   SIGN_ARGS+=(--options runtime --timestamp)
+  APP_SIGN_ARGS=("${SIGN_ARGS[@]}")
+else
+  # A plain ad-hoc signature uses the changing binary hash as its identity.
+  # Give local builds a stable designated requirement so macOS privacy grants
+  # continue to identify VoiceTypeMini after the executable is rebuilt.
+  APP_SIGN_ARGS+=(--requirements '=designated => identifier "com.local.voicetypemini"')
 fi
 
 find "$APP_DIR" -depth \( -name "*.xpc" -o -name "*.framework" -o -name "*.dylib" \) -print0 |
@@ -102,7 +110,7 @@ find "$APP_DIR" -depth \( -name "*.xpc" -o -name "*.framework" -o -name "*.dylib
     codesign "${SIGN_ARGS[@]}" "$signable"
   done
 
-codesign "${SIGN_ARGS[@]}" \
+codesign "${APP_SIGN_ARGS[@]}" \
   --entitlements "$ROOT_DIR/AppConfig/VoiceTypeMini.entitlements" \
   "$APP_DIR"
 

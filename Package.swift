@@ -15,6 +15,10 @@ let package = Package(
         .executable(
             name: "WhisperKitModelPrefetch",
             targets: ["WhisperKitModelPrefetch"]
+        ),
+        .executable(
+            name: "TranscriptionBenchmark",
+            targets: ["TranscriptionBenchmark"]
         )
     ],
     dependencies: [
@@ -36,9 +40,20 @@ let package = Package(
             ],
             path: "Tools/WhisperKitModelPrefetch"
         ),
+        .executableTarget(
+            name: "TranscriptionBenchmark",
+            dependencies: [
+                .product(name: "WhisperKit", package: "argmax-oss-swift")
+            ],
+            path: "Tools/TranscriptionBenchmark"
+        ),
         .testTarget(
             name: "VoiceTypeMiniTests",
             dependencies: ["VoiceTypeMini"]
+        ),
+        .testTarget(
+            name: "TranscriptionBenchmarkTests",
+            dependencies: ["TranscriptionBenchmark"]
         )
     ]
 )

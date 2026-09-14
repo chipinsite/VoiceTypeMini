@@ -21,7 +21,7 @@ struct OpenAITranscriptionClient: TranscriptionClient {
     private let apiKey: String
     private let model: String
 
-    init(apiKey: String, model: String = "gpt-4o-mini-transcribe") {
+    init(apiKey: String, model: String = "gpt-4o-transcribe") {
         self.apiKey = apiKey
         self.model = model
     }

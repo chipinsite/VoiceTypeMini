@@ -458,6 +458,16 @@ private struct CorrectionsControlCenterView: View {
                 .disabled(appState.correctionExamples.isEmpty)
             }
 
+            PanelCard(title: "Automatic learning", iconName: "pencil.and.scribble") {
+                Toggle("Learn from edits after paste", isOn: $appState.isAutomaticEditLearningEnabled)
+                    .toggleStyle(.switch)
+
+                Text("When VoiceTypeMini can clearly see that you corrected the pasted text, it saves that example for future dictation.")
+                    .font(.callout)
+                    .foregroundStyle(VoiceTypeTheme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             PanelCard(title: "Learned fixes", iconName: "wand.and.stars") {
                 if appState.correctionExamples.isEmpty {
                     EmptyStateText("No learned corrections yet. Use Correct & Learn after a transcript.")
@@ -543,7 +553,7 @@ private struct TranscriptionControlCenterView: View {
                 GridItem(.flexible(), spacing: 16),
                 GridItem(.flexible(), spacing: 16)
             ], spacing: 16) {
-                ForEach(TranscriptionBackend.allCases) { backend in
+                ForEach(TranscriptionBackend.selectableCases) { backend in
                     BackendOptionCard(
                         backend: backend,
                         isSelected: appState.selectedBackend == backend
@@ -553,10 +563,29 @@ private struct TranscriptionControlCenterView: View {
                 }
             }
 
+            PanelCard(title: "Smart dictation", iconName: "sparkles") {
+                Toggle("Use OpenAI cleanup", isOn: $appState.isSmartDictationEnabled)
+                    .toggleStyle(.switch)
+
+                Toggle("Include nearby text", isOn: $appState.isNearbyTextContextEnabled)
+                    .toggleStyle(.switch)
+                    .disabled(!appState.isSmartDictationEnabled)
+
+                Text(appState.smartDictationStatusText)
+                    .font(.callout)
+                    .foregroundStyle(VoiceTypeTheme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Text("Off by default. When enabled, sends your transcript, vocabulary, learned corrections, and target-app name to OpenAI, even with local transcription. Include nearby text also sends selected and surrounding text from the focused field.")
+                    .font(.callout)
+                    .foregroundStyle(VoiceTypeTheme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             if appState.selectedBackend == .whisperKit {
                 PanelCard(title: "WhisperKit model", iconName: "cpu") {
                     Picker("", selection: $appState.selectedWhisperModel) {
-                        ForEach(WhisperKitModel.allCases) { model in
+                        ForEach(WhisperKitModel.selectableCases) { model in
                             Text(model.displayName).tag(model)
                         }
                     }
@@ -581,7 +610,7 @@ private struct TranscriptionControlCenterView: View {
                     .buttonStyle(SecondaryButtonStyle())
                     .disabled(!appState.hasOpenAIAPIKey)
 
-                    Text("Used only when OpenAI is selected.")
+                    Text("Used for OpenAI transcription and optional smart dictation cleanup.")
                         .font(.callout)
                         .foregroundStyle(VoiceTypeTheme.muted)
                 }

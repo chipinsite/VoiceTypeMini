@@ -3,6 +3,11 @@ import Foundation
 
 @MainActor
 final class FrontmostApplicationTracker {
+    struct PasteTarget {
+        let name: String
+        let processIdentifier: pid_t
+    }
+
     private let ownBundleIdentifier = Bundle.main.bundleIdentifier
     private var lastApplication: NSRunningApplication?
     private var activationObserver: NSObjectProtocol?
@@ -34,14 +39,33 @@ final class FrontmostApplicationTracker {
         }
     }
 
-    func activateTargetForPaste() async -> String? {
-        guard let app = validLastApplication else {
+    func activateTargetForPaste() async -> PasteTarget? {
+        guard !Task.isCancelled, let app = validLastApplication else {
             return nil
         }
 
-        app.activate(options: [.activateAllWindows])
-        try? await Task.sleep(nanoseconds: 650_000_000)
-        return app.localizedName
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier != app.processIdentifier {
+            guard app.activate(options: [.activateAllWindows]) else {
+                return nil
+            }
+        }
+
+        for _ in 0..<20 {
+            guard !Task.isCancelled else { return nil }
+            if NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier {
+                // Give the target window time to restore its focused text field.
+                try? await Task.sleep(nanoseconds: 120_000_000)
+                guard !Task.isCancelled,
+                      NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier else { return nil }
+                return PasteTarget(
+                    name: app.localizedName ?? "the previous app",
+                    processIdentifier: app.processIdentifier
+                )
+            }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+
+        return nil
     }
 
     private var validLastApplication: NSRunningApplication? {

@@ -13,21 +13,27 @@ struct WhisperKitModelPrefetch {
             )
 
             for model in options.models {
-                print("Downloading WhisperKit model: \(model)")
-                let modelFolder = try await WhisperKit.download(
-                    variant: model,
-                    downloadBase: options.outputDirectory,
-                    useBackgroundSession: true
-                )
+                let modelFolder: URL
+                if options.localOnly {
+                    print("Using local WhisperKit model: \(model)")
+                    modelFolder = try findCompleteModelFolder(for: model, under: options.outputDirectory)
+                } else {
+                    print("Downloading WhisperKit model: \(model)")
+                    modelFolder = try await WhisperKit.download(
+                        variant: model,
+                        downloadBase: options.outputDirectory,
+                        useBackgroundSession: true
+                    )
+                }
 
-                print("Prewarming WhisperKit model: \(model)")
+                print("\(options.load ? "Loading" : "Prewarming") WhisperKit model: \(model)")
                 _ = try await WhisperKit(WhisperKitConfig(
                     model: model,
                     downloadBase: options.outputDirectory,
                     modelFolder: modelFolder.path,
                     verbose: false,
-                    prewarm: true,
-                    load: false,
+                    prewarm: !options.load,
+                    load: options.load,
                     download: false,
                     useBackgroundDownloadSession: true
                 ))
@@ -36,6 +42,8 @@ struct WhisperKitModelPrefetch {
             }
         } catch {
             fputs("\(error.localizedDescription)\n", stderr)
+            let nsError = error as NSError
+            fputs("Domain: \(nsError.domain), code: \(nsError.code), userInfo: \(nsError.userInfo)\n", stderr)
             fputs(Options.usage, stderr)
             exit(1)
         }
@@ -43,10 +51,14 @@ struct WhisperKitModelPrefetch {
 
     private struct Options {
         var outputDirectory: URL
+        var localOnly: Bool
+        var load: Bool
         var models: [String]
 
         init(arguments: [String]) throws {
             var outputPath = "WhisperKitModels"
+            var localOnly = false
+            var load = false
             var models: [String] = []
             var index = 0
 
@@ -60,6 +72,10 @@ struct WhisperKitModelPrefetch {
                         throw ValidationError("Missing value for --output.")
                     }
                     outputPath = arguments[index]
+                case "--local-only":
+                    localOnly = true
+                case "--load":
+                    load = true
                 case "--help", "-h":
                     throw ValidationError(Options.usage)
                 default:
@@ -74,6 +90,8 @@ struct WhisperKitModelPrefetch {
             }
 
             outputDirectory = URL(fileURLWithPath: outputPath)
+            self.localOnly = localOnly
+            self.load = load
             self.models = models
         }
 
@@ -81,6 +99,8 @@ struct WhisperKitModelPrefetch {
 
         Usage:
           swift run WhisperKitModelPrefetch --output WhisperKitModels base
+          swift run WhisperKitModelPrefetch --output WhisperKitModels --load base
+          swift run WhisperKitModelPrefetch --output WhisperKitModels --local-only --load base
 
         This downloads WhisperKit Core ML model weights into a local folder that
         Scripts/build-app.sh can bundle into VoiceTypeMini.app/Contents/Resources.
@@ -97,6 +117,62 @@ struct WhisperKitModelPrefetch {
 
         var errorDescription: String? {
             message
+        }
+    }
+
+    private static func findCompleteModelFolder(for model: String, under root: URL) throws -> URL {
+        guard FileManager.default.fileExists(atPath: root.path) else {
+            throw ValidationError("Missing model directory: \(root.path)")
+        }
+
+        if isCompleteModelFolder(root) {
+            return root
+        }
+
+        let modelNeedle = model.lowercased()
+        let keys: Set<URLResourceKey> = [.isDirectoryKey, .isHiddenKey]
+        let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: Array(keys),
+            options: [.skipsPackageDescendants]
+        )
+
+        while let candidate = enumerator?.nextObject() as? URL {
+            if candidate.pathComponents.contains(where: { $0.hasPrefix(".") }) {
+                continue
+            }
+
+            guard let values = try? candidate.resourceValues(forKeys: keys),
+                  values.isDirectory == true,
+                  values.isHidden != true,
+                  isCompleteModelFolder(candidate) else {
+                continue
+            }
+
+            let name = candidate.lastPathComponent.lowercased()
+            if name == modelNeedle || name.contains(modelNeedle) {
+                return candidate
+            }
+        }
+
+        throw ValidationError("No complete local model folder found for \(model) under \(root.path).")
+    }
+
+    private static func isCompleteModelFolder(_ folder: URL) -> Bool {
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: folder,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return false
+        }
+
+        let names = contents.map(\.lastPathComponent)
+        return ["MelSpectrogram", "AudioEncoder", "TextDecoder"].allSatisfy { requiredName in
+            names.contains { name in
+                name.hasPrefix(requiredName)
+                    && (name.hasSuffix(".mlmodelc") || name.hasSuffix(".mlpackage"))
+            }
         }
     }
 }
